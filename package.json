@@ -1,0 +1,16 @@
+{
+  "name": "auto-booker",
+  "version": "1.0.0",
+  "description": "Ultra-fast PerfectGym auto-booker bot",
+  "main": "login.js",
+  "scripts": {
+    "login": "node login.js",
+    "login:headed": "HEADLESS=false node login.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "playwright": "^1.48.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
