@@ -11,6 +11,13 @@ const USERNAME = process.env.PG_USERNAME;
 const PASSWORD = process.env.PG_PASSWORD;
 const HEADLESS = process.env.HEADLESS !== 'false';
 
+// What to book — override via .env or shell vars. Match the exact text the
+// site renders (e.g. date "23/5" not "23/05").
+const FACILITY_TYPE = process.env.FACILITY_TYPE || 'Volleyball Courts';
+const BOOKING_DATE = process.env.BOOKING_DATE || '23/5';
+const START_TIME = process.env.START_TIME || '07:00 AM';
+const MAX_NEXT_WEEK_CLICKS = 2;
+
 if (!USERNAME || !PASSWORD) {
   console.error('[FATAL] PG_USERNAME and PG_PASSWORD must be set in .env');
   process.exit(1);
@@ -104,6 +111,61 @@ async function selectFacilityType(page, facilityName) {
   log(`[OK] Filtered to "${newText}" in ${Date.now() - selectStart}ms.`);
 }
 
+async function findDateColumn(page, targetDate, maxNextClicks = MAX_NEXT_WEEK_CLICKS) {
+  const dateBoxSel = 'td.cp-calendar-date-box';
+  const dateSel = `${dateBoxSel} .cp-calendar-date`;
+  const nextBtnSel = 'td.cp-calendar-btn-next i[aria-label="Next week"]';
+
+  await page.waitForSelector(dateSel, { timeout: 15000 });
+
+  for (let attempt = 0; attempt <= maxNextClicks; attempt++) {
+    const { index, dates } = await page.evaluate(
+      ({ sel, target }) => {
+        const boxes = Array.from(document.querySelectorAll(sel));
+        const visibleDates = boxes.map((box) => {
+          const el = box.querySelector('.cp-calendar-date');
+          return el ? el.textContent.trim() : '';
+        });
+        return { index: visibleDates.indexOf(target), dates: visibleDates };
+      },
+      { sel: dateBoxSel, target: targetDate },
+    );
+
+    log(`Week ${attempt + 1}: visible dates [${dates.join(', ')}]`);
+
+    if (index !== -1) {
+      log(`[OK] Found "${targetDate}" at column index ${index}.`);
+      return index;
+    }
+
+    if (attempt === maxNextClicks) {
+      throw new Error(
+        `Date "${targetDate}" not found after ${maxNextClicks} next-week clicks. Last visible: [${dates.join(', ')}]`,
+      );
+    }
+
+    const nextBtn = page.locator(nextBtnSel).first();
+    const canGoForward = await nextBtn.isVisible().catch(() => false);
+    if (!canGoForward) {
+      throw new Error(
+        `Date "${targetDate}" not found and Next-week button is not available. Visible: [${dates.join(', ')}]`,
+      );
+    }
+
+    const firstBefore = dates[0];
+    log(`Date not in this week — clicking Next week (${attempt + 1}/${maxNextClicks})...`);
+    await nextBtn.click();
+    await page.waitForFunction(
+      ({ sel, before }) => {
+        const first = document.querySelector(`${sel} .cp-calendar-date`);
+        return first && first.textContent.trim() !== before;
+      },
+      { sel: dateBoxSel, before: firstBefore },
+      { timeout: 10000 },
+    );
+  }
+}
+
 (async () => {
   log(`Launching Chromium (headless=${HEADLESS})...`);
   const browser = await chromium.launch({
@@ -181,11 +243,21 @@ async function selectFacilityType(page, facilityName) {
     await context.storageState({ path: path.join(__dirname, 'auth-state.json') });
     log('Saved auth state to auth-state.json');
 
+    log(`Booking target — facility: "${FACILITY_TYPE}", date: "${BOOKING_DATE}", start: "${START_TIME}".`);
+
     await ensureOnFacilityBookingPage(page);
-    await selectFacilityType(page, 'Volleyball Courts');
+    await selectFacilityType(page, FACILITY_TYPE);
 
     await page.screenshot({
-      path: path.join(SCREENSHOT_DIR, `volleyball-filtered-${ts()}.png`),
+      path: path.join(SCREENSHOT_DIR, `facility-filtered-${ts()}.png`),
+      fullPage: true,
+    });
+
+    const dateColumnIndex = await findDateColumn(page, BOOKING_DATE);
+    log(`Date column index for "${BOOKING_DATE}" = ${dateColumnIndex} (use this to pick the time-slot column later).`);
+
+    await page.screenshot({
+      path: path.join(SCREENSHOT_DIR, `date-found-${ts()}.png`),
       fullPage: true,
     });
   } catch (err) {
