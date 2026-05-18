@@ -22,6 +22,88 @@ if (!fs.existsSync(SCREENSHOT_DIR)) fs.mkdirSync(SCREENSHOT_DIR, { recursive: tr
 const ts = () => new Date().toISOString().replace(/[:.]/g, '-');
 const log = (msg) => console.log(`[${new Date().toISOString()}] ${msg}`);
 
+async function ensureOnFacilityBookingPage(page) {
+  if (page.url().includes('FacilityBooking')) {
+    log('Already on FacilityBooking page.');
+    return;
+  }
+  log('Not on FacilityBooking page — clicking Facility nav link...');
+  const navStart = Date.now();
+  await page.click('a[baf-state="FacilityBookings"]');
+  await page.waitForURL(/FacilityBooking/, { timeout: 15000 });
+  log(`Navigated to FacilityBooking in ${Date.now() - navStart}ms (url=${page.url()})`);
+}
+
+async function selectFacilityType(page, facilityName) {
+  const comboRoot = 'baf\\:combobox[name="facilityTypeCombo"]';
+  const comboInput = `${comboRoot} .baf-combobox-input`;
+  const selectedItem = `${comboRoot} .baf-combobox-selected-item`;
+
+  log(`Waiting for facility type combobox...`);
+  await page.waitForSelector(comboInput, { timeout: 15000 });
+
+  const currentText = (await page.locator(selectedItem).first().textContent().catch(() => '') || '').trim();
+  log(`Current facility type: "${currentText}"`);
+
+  if (currentText === facilityName) {
+    log(`[OK] Already filtered to ${facilityName} — no action needed.`);
+    return;
+  }
+
+  log(`Opening dropdown to select "${facilityName}"...`);
+  const selectStart = Date.now();
+  await page.click(comboInput);
+
+  const searchInput = page.locator('input[placeholder="Search..."]:visible').first();
+  const searchTerm = facilityName.split(' ')[0];
+  try {
+    await searchInput.waitFor({ timeout: 4000 });
+    await searchInput.fill(searchTerm);
+    log(`Typed "${searchTerm}" in search to filter options.`);
+  } catch (_) {
+    log('No search input visible — will click option directly.');
+  }
+
+  const clicked = await page.evaluate((name) => {
+    const isVisible = (el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return false;
+      const style = getComputedStyle(el);
+      return style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const candidates = Array.from(document.querySelectorAll('span, li, div, a, button'));
+    for (const el of candidates) {
+      if (el.textContent.trim() !== name) continue;
+      if (!isVisible(el)) continue;
+      const target = el.closest('[ng-click], li, [role="option"], .baf-combobox-list-item') || el;
+      target.click();
+      return { ok: true, tag: target.tagName, cls: target.className };
+    }
+    return { ok: false };
+  }, facilityName);
+
+  if (!clicked.ok) {
+    await page.screenshot({
+      path: path.join(SCREENSHOT_DIR, `dropdown-open-${ts()}.png`),
+      fullPage: true,
+    });
+    throw new Error(`Could not click dropdown option "${facilityName}". See dropdown-open screenshot.`);
+  }
+  log(`Clicked option "${facilityName}" via ${clicked.tag}.${clicked.cls || ''}`);
+
+  await page.waitForFunction(
+    ({ sel, expected }) => {
+      const el = document.querySelector(sel);
+      return el && el.textContent.trim() === expected;
+    },
+    { sel: selectedItem, expected: facilityName },
+    { timeout: 8000 },
+  );
+
+  const newText = (await page.locator(selectedItem).first().textContent()).trim();
+  log(`[OK] Filtered to "${newText}" in ${Date.now() - selectStart}ms.`);
+}
+
 (async () => {
   log(`Launching Chromium (headless=${HEADLESS})...`);
   const browser = await chromium.launch({
@@ -92,11 +174,20 @@ const log = (msg) => console.log(`[${new Date().toISOString()}] ${msg}`);
         .catch(() => null);
       if (errText) log(`Error text: ${errText.trim()}`);
       process.exitCode = 2;
-    } else {
-      log('[OK] Login successful — redirected away from login page.');
-      await context.storageState({ path: path.join(__dirname, 'auth-state.json') });
-      log('Saved auth state to auth-state.json');
+      return;
     }
+
+    log('[OK] Login successful — redirected away from login page.');
+    await context.storageState({ path: path.join(__dirname, 'auth-state.json') });
+    log('Saved auth state to auth-state.json');
+
+    await ensureOnFacilityBookingPage(page);
+    await selectFacilityType(page, 'Volleyball Courts');
+
+    await page.screenshot({
+      path: path.join(SCREENSHOT_DIR, `volleyball-filtered-${ts()}.png`),
+      fullPage: true,
+    });
   } catch (err) {
     log(`[ERROR] ${err.message}`);
     await page.screenshot({ path: path.join(SCREENSHOT_DIR, `error-${ts()}.png`), fullPage: true }).catch(() => {});
